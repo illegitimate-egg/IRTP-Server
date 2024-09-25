@@ -20,6 +20,132 @@ struct client {
 
 bool isRunning = true;
 
+enum protocolRecMessages { _INCOMPLETE = -1, IDENT, SEND, IMAGE };
+
+std::string escapedString(char **ptr, char *vicodin) {
+  bool escape = true;
+  std::string retval = "";
+  while (escape) {
+    vicodin = strtok_r(NULL, " ", ptr);
+
+    if (vicodin[strlen(vicodin) - 1] != '\\') {
+      retval.append(vicodin);
+      escape = false;
+    } else {
+      vicodin[strlen(vicodin) - 1] =
+          '\0'; // Convert the backslash to null smeller
+      retval.append(vicodin);
+      retval.append(" ");
+    }
+  }
+
+  return retval;
+}
+
+std::string escape(std::string inputString) {
+  char *ptr;
+  std::string output = "";
+
+  char c_string[inputString.length() + 1];
+  strcpy(c_string, inputString.c_str());
+
+  char *res;
+  res = strtok_r(c_string, " ", &ptr);
+
+  while (res != NULL) {
+    if (output.length() != 0) {
+      output.append("\\ ");
+    }
+    output.append(res);
+  }
+
+  return output;
+}
+
+int IRTPRec(std::vector<client *> *clients,
+            int index) { // I am not qualified to write a parser lmfao
+  client *client = clients->at(index);
+  char *nlPtr;
+
+  int recType = _INCOMPLETE;
+
+  int word, row = 0;
+
+  char c_message[client->processingMessage.length() + 1];
+  strcpy(c_message, client->processingMessage.c_str());
+
+  char *res;
+  res = strtok_r(c_message, "\n", &nlPtr);
+
+  std::string channelName = "";
+
+  while (res != NULL) {
+    word = 0;
+    char *spPtr;
+    char *vicodin;
+
+    char completeString[strlen(res) + 1];
+    strcpy(completeString, res);
+
+    vicodin = strtok_r(res, " ", &spPtr);
+
+    while (vicodin != NULL) {
+      if (recType == SEND) {
+        std::cout << "(" << channelName << ") " << client->username << ": "
+                  << completeString << std::endl;
+        std::string outGoing = "SEND " + escape(channelName) + " IRTP/1.0\n\n" + completeString + "\n";
+        for (uint j = 0; j < clients->size(); j++) {
+          if (send(clients->at(j)->fd,
+                   outGoing.c_str(),
+                   outGoing.length(),
+                   MSG_NOSIGNAL) < 0) {
+            clients->at(j)->active = false;
+          }
+        }
+        client->processingMessage = "";
+        row = 0;
+        recType = _INCOMPLETE;
+      }
+      if (word == 0) {
+        if (strcmp(vicodin, "IDENT") == 0) {
+          recType = IDENT;
+
+          std::string username = escapedString(&spPtr, vicodin);
+
+          vicodin = strtok_r(NULL, " ", &spPtr);
+          if (strcmp(vicodin, "IRTP/1.0") != 0) {
+            recType = _INCOMPLETE;
+          } else {
+            client->username = username;
+          }
+          row = 0;
+          client->processingMessage = "";
+        } else if (strcmp(vicodin, "SEND") == 0) {
+          recType = SEND; // And alexander wept, because he had no more worlds
+                          // left to conquer
+          channelName = escapedString(&spPtr, vicodin);
+
+          vicodin = strtok_r(NULL, " ", &spPtr);
+          if (strcmp(vicodin, "IRTP/1.0") != 0) {
+            recType = _INCOMPLETE;
+            client->processingMessage = "";
+          }
+        } else if (row == 0) {
+          // Shit pant
+          client->processingMessage = "";
+        }
+      }
+
+      vicodin = strtok_r(NULL, " ", &spPtr);
+      word++;
+    }
+
+    res = strtok_r(NULL, "\n", &nlPtr);
+    row++;
+  }
+  return recType;
+}
+
 void communication(std::vector<client *> *clients, bool *blockConnection) {
   while (isRunning) {
     uint numberOfClients = clients->size();
@@ -40,7 +166,7 @@ void communication(std::vector<client *> *clients, bool *blockConnection) {
       fds[i].revents = 0;
     }
 
-    if (poll(fds, numberOfClients, 500)) {
+    if (poll(fds, numberOfClients, 20)) {
       *blockConnection = true;
       for (uint i = 0; i < numberOfClients; i++) {
         if (fds[i].revents & POLLIN) {
@@ -49,15 +175,7 @@ void communication(std::vector<client *> *clients, bool *blockConnection) {
             clients->at(i)->active = false;
           } else {
             clients->at(i)->processingMessage.append(buffer);
-            for (uint j = 0; j < numberOfClients; j++) {
-              if (send(clients->at(j)->fd,
-                       clients->at(i)->processingMessage.c_str(),
-                       clients->at(i)->processingMessage.length(),
-                       MSG_NOSIGNAL) < 0) {
-                clients->at(j)->active = false;
-              }
-            }
-            clients->at(i)->processingMessage = "";
+            IRTPRec(clients, i);
           }
           memset(buffer, 0, sizeof buffer);
         }
@@ -92,13 +210,7 @@ int main() {
   std::thread ct(communication, &clients, &blockConnection);
   ct.detach();
 
-  struct sigaction cleanExit = {
-    &handleSigint,
-    0,
-    0,
-    0,
-    0
-  };
+  struct sigaction cleanExit = {&handleSigint, 0, 0, 0, 0};
   sigaction(SIGINT, &cleanExit, NULL);
 
   while (isRunning) {
